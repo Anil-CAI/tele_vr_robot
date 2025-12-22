@@ -1,0 +1,448 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>tele_vr_robot — VR Teleop + Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <style>
+    body { margin:0; overflow:hidden; background:#000; font-family:sans-serif; }
+
+    #hud {
+      position:fixed;
+      left:10px;
+      top:10px;
+      color:#fff;
+      background:rgba(0,0,0,0.45);
+      padding:8px 10px;
+      border-radius:8px;
+      z-index:9999;
+      width:300px;
+      font-size:14px;
+    }
+
+    #controls {
+      margin-top:4px;
+      margin-bottom:4px;
+    }
+    #controls button {
+      margin:2px;
+      padding:4px 8px;
+      font-size:13px;
+    }
+
+    #modeButtons { margin-top:6px; }
+    #modeButtons button {
+      margin:2px;
+      padding:4px 8px;
+      font-size:13px;
+    }
+
+    #driveButtons {
+      margin-top:6px;
+    }
+    #driveButtons button {
+      margin:2px;
+      padding:6px 10px;
+      font-size:13px;
+      min-width:70px;
+    }
+
+    #statusLine { margin-top:6px; }
+    #cmdLine    { margin-top:2px; }
+    #poseLine   { margin-top:2px; }
+
+    #log {
+      margin-top:6px;
+      max-height:120px;
+      overflow:auto;
+      font-size:11px;
+      color:#ddd;
+    }
+
+    /* Camera window (top-right) */
+    #camFeed {
+      position:fixed;
+      right:10px;
+      top:10px;
+      width:320px;
+      height:240px;
+      border:2px solid #fff;
+      border-radius:8px;
+      z-index:9998;
+      background:#000;
+      object-fit:cover;
+    }
+
+    /* Map panel (bottom-right) */
+    #mapCanvas {
+      position:fixed;
+      right:10px;
+      bottom:10px;
+      width:320px;
+      height:320px;
+      border:2px solid #fff;
+      border-radius:8px;
+      z-index:9998;
+      background:#111;
+    }
+
+    #mapLabel {
+      position:fixed;
+      right:14px;
+      bottom:336px;
+      color:#fff;
+      font-size:13px;
+      z-index:9999;
+      background:rgba(0,0,0,0.6);
+      padding:2px 6px;
+      border-radius:4px;
+    }
+
+    /* overlay to block map clicks when needed */
+    #mapCover {
+      position:fixed;
+      right:10px;
+      bottom:10px;
+      width:320px;
+      height:320px;
+      z-index:10000;
+      pointer-events:none; /* toggled by script */
+    }
+
+    /* full-screen camera view class */
+    .cam-full {
+      position:fixed !important;
+      left:0 !important;
+      top:0 !important;
+      width:100% !important;
+      height:100% !important;
+      border-radius:0 !important;
+      z-index:100000 !important;
+    }
+
+    /* small exit/mode button shown in camera full-screen */
+    #camExitBtn {
+      position:fixed;
+      left:12px;
+      top:12px;
+      z-index:100001;
+      background:rgba(0,0,0,0.6);
+      color:#fff;
+      border:1px solid #fff;
+      padding:6px 8px;
+      border-radius:6px;
+      font-size:14px;
+      cursor:pointer;
+      display:none; /* toggled in JS */
+    }
+
+    /* hide element helper */
+    .hidden { display:none !important; }
+  </style>
+</head>
+
+<body>
+  <div id="hud">
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div><b>VR Teleop</b></div>
+      <div style="font-size:12px; opacity:0.9;">Keyboard: W/A/S/D</div>
+    </div>
+
+    <div id="controls">
+      <button id="enterVr">Enter VR</button>
+      <span style="margin-left:6px;"></span>
+    </div>
+
+    <div id="modeButtons">
+      <button id="modeHud" class="modeBtn">HUD Mode</button>
+      <button id="modeCam" class="modeBtn">Camera Mode</button>
+      <button id="modeAuto" class="modeBtn">Autonomy Mode</button>
+    </div>
+
+    <div id="driveButtons">
+      <div>
+        <button id="btnFwd">Forward</button>
+        <button id="btnStop">Stop</button>
+        <button id="btnBack">Back</button>
+      </div>
+      <div>
+        <button id="btnLeft">Left</button>
+        <button id="btnRight">Right</button>
+      </div>
+    </div>
+
+    <div id="statusLine">
+      Status: <span id="status">idle</span>
+    </div>
+    <div id="cmdLine">
+      Cmd: <span id="cmdText">v=0.00 w=0.00</span>
+    </div>
+    <div id="poseLine">
+      Pose: <span id="poseText">?</span>
+    </div>
+
+    <div id="log"></div>
+  </div>
+
+  <!-- Camera feed -->
+  <img id="camFeed" src="/camera/stream" />
+
+  <!-- Map label + canvas -->
+  <div id="mapLabel">Map (click to send nav goal)</div>
+  <canvas id="mapCanvas"></canvas>
+  <div id="mapCover" title="map cover"></div>
+
+  <!-- Exit / Mode button for camera-full (visible in camera mode) -->
+  <button id="camExitBtn" title="Exit Camera Mode">Exit Camera</button>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./node_modules/three/build/three.module.js"
+    }
+  }
+  </script>
+
+  <script type="module" src="./vr_app.js"></script>
+
+  <!-- Inline controller for mode switching (does not modify other files) -->
+  <script>
+  (function() {
+    // config must match vr_app.js map constants
+    const MAP_RESOLUTION = 0.05;
+    const MAP_ORIGIN_X = -1.22;
+    const MAP_ORIGIN_Y = -2.4;
+
+    // DOM refs
+    const modeHudBtn = document.getElementById('modeHud');
+    const modeCamBtn = document.getElementById('modeCam');
+    const modeAutoBtn = document.getElementById('modeAuto');
+    const driveButtons = document.getElementById('driveButtons');
+    const mapCover = document.getElementById('mapCover');
+    const camFeed = document.getElementById('camFeed');
+    const mapCanvas = document.getElementById('mapCanvas');
+    const mapLabel = document.getElementById('mapLabel');
+    const statusSpan = document.getElementById('status');
+    const logDiv = document.getElementById('log');
+    const camExitBtn = document.getElementById('camExitBtn');
+
+    // state
+    let mode = 'hud'; // 'hud' | 'camera' | 'autonomy'
+    let ws = null;    // local WS to same server (separate from vr_app.js)
+    let lastGoal = null;
+    let navBusy = false;
+    let latestPose = null;
+
+    const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+
+    function log(msg) {
+      const t = new Date().toLocaleTimeString();
+      logDiv.innerText = `[${t}] ${msg}\n` + logDiv.innerText;
+    }
+
+    function connectWS() {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = () => { log('mode-ws connected'); };
+      ws.onclose = () => { log('mode-ws closed, reconnect 1s'); setTimeout(connectWS, 1000); };
+      ws.onerror = (e) => { log('mode-ws error'); };
+      ws.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.type === 'nav_goal_ack') {
+            lastGoal = { x: d.x, y: d.y, theta: d.theta };
+            navBusy = true;
+            statusSpan.innerText = 'nav started';
+            log(`nav_goal_ack x=${d.x.toFixed(2)} y=${d.y.toFixed(2)}`);
+          } else if (d.type === 'pose') {
+            latestPose = d;
+            // if nav in progress, check distance to goal
+            if (navBusy && lastGoal) {
+              const dx = latestPose.x - lastGoal.x;
+              const dy = latestPose.y - lastGoal.y;
+              const dist = Math.sqrt(dx*dx + dy*dy);
+              // threshold: 0.3m -> goal reached
+              if (dist < 0.35) {
+                navBusy = false;
+                statusSpan.innerText = 'nav reached';
+                log(`nav reached dist=${dist.toFixed(2)}m`);
+                try { ws.send(JSON.stringify({ type: 'nav_reached', x: lastGoal.x, y: lastGoal.y })); } catch(e){}
+              } else {
+                statusSpan.innerText = 'nav in-progress';
+              }
+            }
+          } else if (d.type === 'ack') {
+            // teleop ack
+          }
+        } catch(e) {
+          // ignore parse errors
+        }
+      };
+    }
+
+    connectWS();
+
+    // Mode handlers
+    function setModeHud() {
+      mode = 'hud';
+      // HUD controllers active
+      driveButtons.style.pointerEvents = 'auto';
+      driveButtons.style.opacity = '1.0';
+      // map clicks blocked (in HUD mode nav disabled)
+      mapCover.style.pointerEvents = 'auto';
+      mapCover.style.background = 'rgba(0,0,0,0.0)';
+      // camera small
+      camFeed.classList.remove('cam-full');
+      // map visible
+      mapCanvas.classList.remove('hidden');
+      mapLabel.classList.remove('hidden');
+      statusSpan.innerText = 'HUD mode';
+      log('switched to HUD mode');
+      // hide cam exit button (not needed)
+      camExitBtn.style.display = 'none';
+      // allow keyboard teleop
+      removeKeyBlock();
+    }
+
+    function setModeCam() {
+      mode = 'camera';
+      // hide map & HUD drive controls
+      driveButtons.style.pointerEvents = 'none';
+      driveButtons.style.opacity = '0.4';
+      mapCanvas.classList.add('hidden');
+      mapLabel.classList.add('hidden');
+      // map cover block to be safe
+      mapCover.style.pointerEvents = 'auto';
+      // camera full screen
+      camFeed.classList.add('cam-full');
+      statusSpan.innerText = 'Camera mode';
+      log('switched to Camera mode');
+      // show exit button so user can switch modes
+      camExitBtn.style.display = 'block';
+      // block keyboard teleop (we don't want accidental moves in camera mode)
+      addKeyBlock();
+    }
+
+    function setModeAuto() {
+      mode = 'autonomy';
+      // HUD controllers disabled
+      driveButtons.style.pointerEvents = 'none';
+      driveButtons.style.opacity = '0.4';
+      // map clicks allowed (autonomy uses map clicks)
+      mapCover.style.pointerEvents = 'none';
+      mapCover.style.background = 'transparent';
+      // camera small
+      camFeed.classList.remove('cam-full');
+      // map visible
+      mapCanvas.classList.remove('hidden');
+      mapLabel.classList.remove('hidden');
+      statusSpan.innerText = 'Autonomy mode';
+      log('switched to Autonomy mode');
+      // hide cam exit button
+      camExitBtn.style.display = 'none';
+      // block keyboard teleop
+      addKeyBlock();
+    }
+
+    // keyboard capture to disable teleop in certain modes (use capture to stop vr_app.js handlers)
+    function keyBlockHandler(e) {
+      const k = e.key.toLowerCase();
+      if (['w','a','s','d'].includes(k) || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        return false;
+      }
+    }
+    let keyBlockActive = false;
+    function addKeyBlock(){
+      if (keyBlockActive) return;
+      window.addEventListener('keydown', keyBlockHandler, true);
+      window.addEventListener('keyup', keyBlockHandler, true);
+      keyBlockActive = true;
+    }
+    function removeKeyBlock(){
+      if (!keyBlockActive) return;
+      window.removeEventListener('keydown', keyBlockHandler, true);
+      window.removeEventListener('keyup', keyBlockHandler, true);
+      keyBlockActive = false;
+    }
+
+    // mapCover click: when map is blocked and user clicks cover - just notify
+    mapCover.addEventListener('click', (ev) => {
+      log('Map clicks disabled in current mode');
+    });
+
+    // Mode button events
+    modeHudBtn.addEventListener('click', setModeHud);
+    modeCamBtn.addEventListener('click', setModeCam);
+    modeAutoBtn.addEventListener('click', setModeAuto);
+
+    // Camera exit button: return to HUD (or cycle)
+    camExitBtn.addEventListener('click', () => {
+      // prefer HUD mode on exit
+      setModeHud();
+    });
+
+    // Initialize default
+    setModeHud();
+
+    // Intercept attempts to send nav goal when navBusy true:
+    if (window.WebSocket) {
+      const OriginalWS = window.WebSocket;
+      try {
+        const origSend = OriginalWS.prototype.send;
+        OriginalWS.prototype.send = function(data) {
+          let s = (typeof data === 'string') ? data : (data && data.toString ? data.toString() : '');
+          try {
+            const obj = JSON.parse(s);
+            if (obj && obj.type === 'nav_goal') {
+              if (navBusy) {
+                log('Blocked nav_goal: already navigating');
+                return;
+              } else {
+                navBusy = true;
+                lastGoal = { x: obj.x, y: obj.y, theta: obj.theta };
+                statusSpan.innerText = 'nav requested';
+                log(`nav requested x=${obj.x.toFixed(2)} y=${obj.y.toFixed(2)}`);
+              }
+            }
+          } catch(e){}
+          return origSend.apply(this, arguments);
+        };
+      } catch(e) {
+        // silent fallback
+      }
+    }
+
+    // Expose a small API for checking navBusy from console
+    window.__teleopMode = {
+      getMode: () => mode,
+      isNavBusy: () => navBusy
+    };
+
+    // double-click camera also toggles full-screen; keep exit button visibility in sync
+    camFeed.addEventListener('dblclick', () => {
+      if (camFeed.classList.contains('cam-full')) {
+        camFeed.classList.remove('cam-full');
+        mapCanvas.classList.remove('hidden');
+        mapLabel.classList.remove('hidden');
+        camExitBtn.style.display = 'none';
+      } else {
+        camFeed.classList.add('cam-full');
+        mapCanvas.classList.add('hidden');
+        mapLabel.classList.add('hidden');
+        // In case user dbl-clicked to enter full cam, show exit button
+        camExitBtn.style.display = 'block';
+      }
+    });
+
+    // small safeguard: when page unload, remove keyblock
+    window.addEventListener('beforeunload', () => { removeKeyBlock(); });
+
+    // initial mapCover pointer-events according to HUD default
+    mapCover.style.pointerEvents = 'auto';
+
+    log('mode controller loaded');
+  })();
+  </script>
+</body>
+</html>
